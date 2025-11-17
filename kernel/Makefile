@@ -71,20 +71,16 @@ drivers/usb_keyboard.o \
 
 OBJS=\
 $(ARCHDIR)/crti.o \
-$(ARCHDIR)/crtbegin.o \
 $(KERNEL_OBJS) \
 $(ARCHDIR)/switch.o \
-$(ARCHDIR)/crtend.o \
 $(ARCHDIR)/crtn.o \
 
 LINK_LIST=\
 $(LDFLAGS) \
 $(ARCHDIR)/crti.o \
-$(ARCHDIR)/crtbegin.o \
 $(KERNEL_OBJS) \
 $(ARCHDIR)/switch.o \
 $(LIBS) \
-$(ARCHDIR)/crtend.o \
 $(ARCHDIR)/crtn.o \
 
 # --- 6. The Fix: Clear Suffixes & Define Pattern Rules ---
@@ -110,8 +106,7 @@ jimir.kernel: $(OBJS) $(ARCHDIR)/linker.ld
 	$(CC) -T $(ARCHDIR)/linker.ld -o $@ $(CFLAGS) $(LINK_LIST)
 	grub-file --is-x86-multiboot jimir.kernel
 
-$(ARCHDIR)/crtbegin.o $(ARCHDIR)/crtend.o:
-	OBJ=`$(CC) $(CFLAGS) $(LDFLAGS) -print-file-name=$(@F)` && cp "$$OBJ" $@
+	# crtbegin.o and crtend.o removed; not needed for freestanding kernel
 
 clean:
 	rm -f jimir.kernel
