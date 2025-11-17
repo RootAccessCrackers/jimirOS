@@ -87,9 +87,7 @@ echo "ISO creation complete."
 # --- 5. RUN QEMU ---
 echo "Booting QEMU..."
 
-# Base QEMU flags - use -M pc which includes PIIX chipset
-# The -k en-us flag is critical for ensuring keyboard input is passed correctly.
-QEMU_BASE="-M pc -cdrom jimir.iso -boot d -m 32M -serial stdio -k en-us"
+QEMU_BASE="-M pc -cdrom jimir.iso -boot d -m 32M -serial stdio -k en-us -enable-kvm"
 
 # We are removing the explicit USB flags to fall back to the default PS/2 keyboard.
 USB_FLAGS=""
