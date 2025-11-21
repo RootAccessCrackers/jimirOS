@@ -1,4 +1,3 @@
-
 #include <kernel/htas.h>
 #include <kernel/process.h>
 #include <kernel/tty.h>
@@ -56,7 +55,20 @@ void htas_init(void) {
 
 void htas_set_scheduler(scheduler_type_t type) {
     g_current_scheduler = type;
-    const char* name = (type == SCHED_BASELINE) ? "BASELINE" : "HTAS";
+    
+    const char* name = "UNKNOWN";
+    switch (type) {
+        case SCHED_BASELINE:
+            name = "BASELINE";
+            break;
+        case SCHED_HTAS:
+            name = "HTAS";
+            break;
+        case SCHED_DYNAMIC:
+            name = "DYNAMIC";
+            break;
+    }
+    
     printf("[HTAS] Switched to %s scheduler\n", name);
 }
 
@@ -292,8 +304,13 @@ struct process* htas_select_next(uint8_t cpu_id) {
         int priority = 0;
         
         if (proc->htas_info) {
+            // Add boost from task intent (e.g., LOW_LATENCY)
             priority += proc->htas_info->priority_boost;
             
+            // *** NEW: Add boost from priority aging ***
+            priority += proc->htas_info->priority_boost_aging;
+            
+            // Add boost for NUMA locality
             uint8_t cpu_numa = htas_get_numa_node_for_cpu(cpu_id);
             if (proc->htas_info->preferred_numa_node == cpu_numa) {
                 priority += 5;
@@ -317,6 +334,7 @@ struct process* htas_pick_next_process(struct process* current) {
 
     process_t* next = NULL;
 
+    // 1. Select the next process to run
     if (g_current_scheduler == SCHED_BASELINE) {
         next = baseline_select_next();
     } else {
@@ -324,9 +342,33 @@ struct process* htas_pick_next_process(struct process* current) {
     }
 
     if (!next) {
-        return current;
+        return current; // No runnable processes found
     }
 
+    // --- NEW: PRIORITY AGING LOOP ---
+    // 2. Age all other ready tasks that were *not* selected
+    if (g_current_scheduler == SCHED_HTAS) {
+        process_t* processes = process_get_list();
+        for (int i = 0; i < MAX_PROCESSES; i++) {
+            process_t* proc = &processes[i];
+
+            // Check if task is ready, has HTAS info, and is NOT the one we just picked
+            if (proc->state == PROC_READY && proc != next && proc->htas_info) {
+                
+                proc->htas_info->wait_time++;
+                
+                // If it's waited too long, give it a boost
+                // (Assumes AGING_THRESHOLD is defined in htas.h)
+                if (proc->htas_info->wait_time > AGING_THRESHOLD) { 
+                    // (Assumes AGING_PRIORITY_BOOST is defined in htas.h)
+                    proc->htas_info->priority_boost_aging = AGING_PRIORITY_BOOST; 
+                }
+            }
+        }
+    }
+    // --- END NEW ---
+
+    // 3. Return the selected process
     return next;
 }
 
@@ -339,6 +381,12 @@ void htas_record_switch(process_t* current, process_t* next) {
     stats->context_switches++;
 
     if (next->htas_info) {
+        // --- NEW: RESET AGING COUNTERS ---
+        // The task is now running, so reset its wait time and aging boost
+        next->htas_info->wait_time = 0;
+        next->htas_info->priority_boost_aging = 0;
+        // --- END NEW ---
+
         next->htas_info->total_switches++;
         task_intent_t intent = next->htas_info->profile.intent;
         if ((int)intent < 0 || intent > PROFILE_DEFAULT) {
@@ -406,40 +454,44 @@ void htas_print_stats(scheduler_stats_t* stats, const char* name) {
     printf("========================================\n\n");
 }
 
-void htas_compare_stats(scheduler_stats_t* baseline, scheduler_stats_t* htas) {
+/* Find the htas_compare_stats function and REPLACE it with this new version: */
+
+void htas_compare_stats(scheduler_stats_t* stats_a, const char* name_a, 
+                        scheduler_stats_t* stats_b, const char* name_b) 
+{
     printf("\n========================================\n");
-    printf(" BASELINE vs HTAS COMPARISON\n");
+    printf(" %s vs %s COMPARISON\n", name_a, name_b);
     printf("========================================\n");
     
     // NUMA penalties
-    int32_t numa_diff = ((int32_t)baseline->numa_penalties - (int32_t)htas->numa_penalties);
-    int numa_improvement = (baseline->numa_penalties > 0) 
-        ? (numa_diff * 100) / (int32_t)baseline->numa_penalties : 0;
+    int32_t numa_diff = ((int32_t)stats_a->numa_penalties - (int32_t)stats_b->numa_penalties);
+    int numa_improvement = (stats_a->numa_penalties > 0) 
+        ? (numa_diff * 100) / (int32_t)stats_a->numa_penalties : 0;
     printf("NUMA Penalties:\n");
-    printf("  Baseline: %u\n", (uint32_t)baseline->numa_penalties);
-    printf("  HTAS:     %u\n", (uint32_t)htas->numa_penalties);
-    printf("  Improvement: %d%% reduction\n", numa_improvement);
+    printf("  %s: %u\n", name_a, (uint32_t)stats_a->numa_penalties);
+    printf("  %s: %u\n", name_b, (uint32_t)stats_b->numa_penalties);
+    printf("  %s Improvement: %d%% reduction\n", name_b, numa_improvement);
     
     // Power consumption
-    int32_t power_diff = ((int32_t)baseline->total_power_consumption - (int32_t)htas->total_power_consumption);
-    int power_improvement = (baseline->total_power_consumption > 0)
-        ? (power_diff * 100) / (int32_t)baseline->total_power_consumption : 0;
+    int32_t power_diff = ((int32_t)stats_a->total_power_consumption - (int32_t)stats_b->total_power_consumption);
+    int power_improvement = (stats_a->total_power_consumption > 0)
+        ? (power_diff * 100) / (int32_t)stats_a->total_power_consumption : 0;
     printf("\nPower Consumption:\n");
-    printf("  Baseline: %u units\n", (uint32_t)baseline->total_power_consumption);
-    printf("  HTAS:     %u units\n", (uint32_t)htas->total_power_consumption);
-    printf("  Improvement: %d%% reduction\n", power_improvement);
+    printf("  %s: %u units\n", name_a, (uint32_t)stats_a->total_power_consumption);
+    printf("  %s: %u units\n", name_b, (uint32_t)stats_b->total_power_consumption);
+    printf("  %s Improvement: %d%% reduction\n", name_b, power_improvement);
     
     // Context switches
     printf("\nContext Switches:\n");
-    printf("  Baseline: %u\n", (uint32_t)baseline->context_switches);
-    printf("  HTAS:     %u\n", (uint32_t)htas->context_switches);
+    printf("  %s: %u\n", name_a, (uint32_t)stats_a->context_switches);
+    printf("  %s: %u\n", name_b, (uint32_t)stats_b->context_switches);
     
     // LOW_LATENCY jitter comparison
     printf("\nLOW_LATENCY Task Performance:\n");
-    printf("  Baseline Max Jitter: %u us\n", 
-           (uint32_t)baseline->intent_stats[PROFILE_LOW_LATENCY].max_jitter_us);
-    printf("  HTAS Max Jitter:     %u us\n",
-           (uint32_t)htas->intent_stats[PROFILE_LOW_LATENCY].max_jitter_us);
+    printf("  %s Max Jitter: %u us\n", 
+           name_a, (uint32_t)stats_a->intent_stats[PROFILE_LOW_LATENCY].max_jitter_us);
+    printf("  %s Max Jitter: %u us\n",
+           name_b, (uint32_t)stats_b->intent_stats[PROFILE_LOW_LATENCY].max_jitter_us);
     
     printf("========================================\n\n");
 }
