@@ -78,6 +78,7 @@ typedef struct {
 typedef enum {
     SCHED_BASELINE,   // Round-robin, topology-unaware
     SCHED_HTAS,       // Hint-based topology-aware
+    SCHED_DYNAMIC,    // Dynamic scheduler
 } scheduler_type_t;
 
 /* ============================================================================
@@ -89,6 +90,10 @@ typedef struct htas_task_info {
     uint32_t cpu_affinity_mask;     // Bitmask of allowed CPUs
     int priority_boost;              // For LOW_LATENCY tasks
     uint8_t preferred_numa_node;    // Calculated from data_region
+    
+    // Aging mechanism
+    uint32_t wait_time;              // Ticks waited without running
+    int priority_boost_aging;        // Temporary boost from aging
     
     // Statistics
     uint64_t total_runtime_us;
@@ -103,6 +108,9 @@ typedef struct htas_task_info {
 #define ECORE_SLOWDOWN_FACTOR 2      // E-cores run at 50% speed
 #define NUMA_PENALTY_CYCLES 100      // Cross-NUMA access penalty
 #define LOW_LATENCY_PRIORITY_BOOST 10
+
+#define AGING_THRESHOLD 100          // Ticks before aging boost
+#define AGING_PRIORITY_BOOST 5       // Boost amount for aged tasks
 
 /* ============================================================================
  * API FUNCTIONS
@@ -184,7 +192,8 @@ void htas_reset_stats(void);
 void htas_print_stats(scheduler_stats_t* stats, const char* name);
 
 /* Compare two stat sets */
-void htas_compare_stats(scheduler_stats_t* baseline, scheduler_stats_t* htas);
+void htas_compare_stats(scheduler_stats_t* stats_a, const char* name_a,
+                        scheduler_stats_t* stats_b, const char* name_b);
 
 /* ============================================================================
  * SHELL COMMAND WRAPPERS

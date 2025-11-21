@@ -201,6 +201,7 @@ static void cmd_help(void) {
     printf("  htas-test    - run 30s benchmark with HTAS (topology-aware)\n");
     printf("  htas-full    - run FULL comparison (both schedulers back-to-back)\n");
     printf("  htas-stats   - show current scheduler statistics\n");
+    printf("  sched TYPE   - switch scheduler (baseline, htas, dynamic)\n");
 }
 
 static void cmd_clear(void) { terminal_clear(); }
@@ -384,6 +385,23 @@ static void execute(char* line) {
         scheduler_stats_t* stats = htas_get_stats();
         const char* name = (htas_get_scheduler() == 0) ? "BASELINE" : "HTAS";
         htas_print_stats(stats, name);
+        return;
+    }
+    if (!kstrcmp(line, "sched")) {
+        if (!arg || !*arg) {
+            printf("usage: sched TYPE (baseline, htas, dynamic)\n");
+            return;
+        }
+        extern void htas_set_scheduler(scheduler_type_t);
+        if (!kstrcmp(arg, "baseline")) {
+            htas_set_scheduler(0); // SCHED_BASELINE
+        } else if (!kstrcmp(arg, "htas")) {
+            htas_set_scheduler(1); // SCHED_HTAS
+        } else if (!kstrcmp(arg, "dynamic")) {
+            htas_set_scheduler(2); // SCHED_DYNAMIC
+        } else {
+            printf("unknown scheduler type: %s\n", arg);
+        }
         return;
     }
     

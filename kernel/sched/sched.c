@@ -5,6 +5,13 @@
 
 #define MAX_THREADS 16
 #define STACK_SIZE  (8*1024)
+#define AGING_THRESHOLD 32
+
+static const int priority_quantum[SCHED_PRIORITY_LEVELS] = {4, 6, 10, 18};
+static const char* priority_names[SCHED_PRIORITY_LEVELS] = {
+    "RT", "INT", "BG", "BATCH"
+};
+static const int DEFAULT_PRIORITY = SCHED_PRIORITY_INTERACTIVE;
 
 typedef enum { T_UNUSED=0, T_READY, T_RUNNING, T_BLOCKED } tstate_t;
 
@@ -12,6 +19,9 @@ struct kthread {
     uint32_t esp;
     tstate_t state;
     char     name[16];
+    uint8_t  priority;
+    uint8_t  slice_left;
+    uint16_t wait_ticks;
 };
 
 static struct kthread th[MAX_THREADS];
@@ -20,6 +30,9 @@ static int current = -1;
 extern void ctx_switch(uint32_t* old_esp, uint32_t new_esp);
 
 static void kthread_trampoline(void);
+static void apply_aging(void);
+static int select_next(void);
+static void refill_slice(int tid);
 
 struct start_pack { kthread_fn fn; void* arg; };
 
@@ -45,7 +58,11 @@ static uint32_t new_stack_with_trampoline(kthread_fn fn, void* arg){
 void sched_init(void){
     memset(th, 0, sizeof(th));
     /* slot 0 is the bootstrap thread (current CPU context) */
-    th[0].state = T_RUNNING; current = 0; th[0].name[0]='i'; th[0].name[1]='d'; th[0].name[2]='l'; th[0].name[3]='e'; th[0].name[4]='\0';
+    th[0].state = T_RUNNING; current = 0;
+    th[0].name[0]='i'; th[0].name[1]='d'; th[0].name[2]='l'; th[0].name[3]='e'; th[0].name[4]='\0';
+    th[0].priority = SCHED_PRIORITY_BATCH;
+    th[0].wait_ticks = 0;
+    refill_slice(0);
 }
 
 int kthread_create(kthread_fn fn, void* arg, const char* name){
@@ -57,42 +74,69 @@ int kthread_create(kthread_fn fn, void* arg, const char* name){
             th[i].state = T_READY;
             int j=0; if (name){ while (name[j] && j<15){ th[i].name[j]=name[j]; j++; } }
             th[i].name[j]=0;
+            th[i].priority = DEFAULT_PRIORITY;
+            th[i].wait_ticks = 0;
+            refill_slice(i);
             return i;
         }
     }
     return -1;
 }
 
+int sched_set_priority(int pid, int priority){
+    if (pid < 0 || pid >= MAX_THREADS) return -1;
+    if (priority < SCHED_PRIORITY_REALTIME || priority >= SCHED_PRIORITY_LEVELS) return -1;
+    if (th[pid].state == T_UNUSED) return -1;
+    th[pid].priority = priority;
+    th[pid].wait_ticks = 0;
+    refill_slice(pid);
+    return 0;
+}
+
 void sched_ps(void){
-    printf("PID  STATE     NAME\n");
+    printf("PID  STATE     PRI  NAME\n");
     for (int i=0;i<MAX_THREADS;i++){
         if (th[i].state!=T_UNUSED){
             const char* st = (th[i].state==T_RUNNING)?"RUNNING":(th[i].state==T_READY?"READY":"BLOCKED");
-            printf("%2d   %-8s %s%s\n", i, st, th[i].name, (i==current)?" *":"");
+            const char* pr = (th[i].priority < SCHED_PRIORITY_LEVELS) ? priority_names[th[i].priority] : "??";
+            printf("%2d   %-8s %-4s %s%s\n", i, st, pr, th[i].name, (i==current)?" *":"");
         }
     }
 }
 
-static int rr_next(int from){
-    for (int k=1;k<=MAX_THREADS;k++){
-        int i = (from + k) % MAX_THREADS;
-        if (th[i].state == T_READY) return i;
-    }
-    return from;
-}
-
 void sched_yield(void){
-    int next = rr_next(current);
-    if (next == current) return;
-    int prev = current; current = next;
+    apply_aging();
+    int next = select_next();
+    if (next < 0 || next == current) return;
+    int prev = current;
     th[prev].state = T_READY;
+    th[prev].wait_ticks = 0;
+    refill_slice(prev);
     th[next].state = T_RUNNING;
+    th[next].wait_ticks = 0;
+    refill_slice(next);
+    current = next;
     ctx_switch(&th[prev].esp, th[next].esp);
 }
 
 void sched_tick(void){
-    /* simple round-robin every tick */
-    sched_yield();
+    if (current < 0) return;
+    for (int i=1;i<MAX_THREADS;i++){
+        if (i != current && th[i].state == T_READY){
+            th[i].wait_ticks++;
+        }
+    }
+    if (th[current].slice_left > 0) th[current].slice_left--;
+    apply_aging();
+    int next = select_next();
+    if (next >= 0 && (th[next].priority < th[current].priority || th[current].slice_left == 0)){
+        th[current].slice_left = priority_quantum[th[current].priority];
+        sched_yield();
+        return;
+    }
+    if (th[current].slice_left == 0){
+        refill_slice(current);
+    }
 }
 
 /* Runs on a fresh stack for the new thread */
@@ -104,4 +148,37 @@ static void kthread_trampoline(void){
     pack.fn(pack.arg);
     /* If function returns, just park */
     for(;;) { __asm__ volatile("hlt"); }
+}
+
+static void refill_slice(int tid){
+    if (tid < 0 || tid >= MAX_THREADS) return;
+    th[tid].slice_left = priority_quantum[th[tid].priority];
+}
+
+static void apply_aging(void){
+    for (int i = 1; i < MAX_THREADS; i++){
+        if (th[i].state == T_READY && th[i].wait_ticks >= AGING_THRESHOLD && th[i].priority > SCHED_PRIORITY_REALTIME){
+            th[i].priority--;
+            th[i].wait_ticks = 0;
+            refill_slice(i);
+        }
+    }
+}
+
+static int select_next(void){
+    int best = -1;
+    int best_prio = SCHED_PRIORITY_LEVELS;
+    int best_wait = -1;
+    for (int i = 1; i < MAX_THREADS; i++){
+        if (th[i].state == T_READY){
+            int prio = th[i].priority;
+            int wait = th[i].wait_ticks;
+            if (best < 0 || prio < best_prio || (prio == best_prio && wait > best_wait)){
+                best = i;
+                best_prio = prio;
+                best_wait = wait;
+            }
+        }
+    }
+    return best;
 }
